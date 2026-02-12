@@ -142,7 +142,6 @@ expected_octets_for_role() {
 }
 
 cleanup_lo_ips() {
-  # Remove ALL 10.50.* loopback /32 addresses (safe for our scheme)
   ip -4 addr show dev lo | awk '/10\.50\./ {print $2}' | while read -r cidr; do
     ip addr del "$cidr" dev lo >/dev/null 2>&1 || true
   done
@@ -150,9 +149,9 @@ cleanup_lo_ips() {
 
 enforce_lo_ips_for_role() {
   local role="$1" count="$2"
-  read -r local_octet remote_octet < <(expected_octets_for_role "$role")
+  read -r local_octet _ < <(expected_octets_for_role "$role")
 
-  # Clean first to avoid mixed roles (.1 and .2 together) or the famous "both .2"
+  # Always clean to prevent mixed roles / both .2 issue
   cleanup_lo_ips
 
   for ((i=0; i<count; i++)); do
@@ -161,7 +160,7 @@ enforce_lo_ips_for_role() {
     ip addr add "${lip}/32" dev lo >/dev/null 2>&1 || true
   done
 
-  # Sanity check (prevents silent wrong role)
+  # Sanity check
   local expected_first="10.50.50.${local_octet}"
   if ! ip -4 addr show dev lo | grep -qE "\\b${expected_first}/32\\b"; then
     echo -e "${RED}ERROR:${NC} Loopback sanity check failed."
@@ -170,11 +169,31 @@ enforce_lo_ips_for_role() {
   fi
 }
 
+detect_suggested_location() {
+  # Heuristic:
+  # If default gateway is private (RFC1918), usually cloud/VPC => Abroad
+  # If default gateway is public, often Iran/DC public routed => Iran
+  local gw
+  gw="$(ip -4 route show default 2>/dev/null | awk '{print $3}' | head -n1)"
+  if [[ -z "${gw}" ]]; then
+    echo "unknown"; return
+  fi
+  if [[ "${gw}" =~ ^10\.|^192\.168\.|^172\.(1[6-9]|2[0-9]|3[0-1])\. ]]; then
+    echo "abroad"
+  else
+    echo "iran"
+  fi
+}
+
+extract_children_from_conf() {
+  # Prints child names like link50 link60...
+  awk '/^[[:space:]]*link[0-9]+[[:space:]]*{/ {gsub("{","",$1); print $1}' "${SWAN_CONF}" 2>/dev/null || true
+}
+
 load_strongswan_safe() {
   echo -e "${BLU}[*] Loading configuration...${NC}"
   systemctl restart strongswan >/dev/null 2>&1 || true
 
-  # wait for VICI socket (max 8s)
   for i in {1..8}; do
     [[ -S /run/charon.vici || -S /var/run/charon.vici ]] && break
     sleep 1
@@ -192,7 +211,11 @@ load_strongswan_safe() {
     exit 1
   fi
 
-  swanctl --initiate --ike delta >/dev/null 2>&1 || true
+  # Initiate each child explicitly (prevents IKE-only)
+  local child
+  for child in $(extract_children_from_conf); do
+    swanctl --initiate --child "$child" >/dev/null 2>&1 || true
+  done
 }
 
 write_config() {
@@ -296,11 +319,36 @@ install_or_update() {
 
   local role remote_pub count psk
   role="$(ask_role)"
+
+  # Role Guard (anti mistake)
+  local suggested
+  suggested="$(detect_suggested_location)"
+  if [[ "${suggested}" != "unknown" && "${role}" != "${suggested}" ]]; then
+    echo
+    echo -e "${RED}WARNING:${NC} Your selection looks wrong for this server."
+    echo -e "Detected environment suggests: ${YLW}${suggested^^}${NC}"
+    echo -e "You selected: ${YLW}${role^^}${NC}"
+    echo -e "${YLW}If you continue, both servers may end up with the same .1/.2 side and it will NOT work.${NC}"
+    echo
+    local ok
+    ok="$(read_choice "Type YES to continue anyway: ")"
+    [[ "$ok" == "YES" ]] || return
+  fi
+
   echo
   remote_pub="$(ask_ipv4 "Enter the OTHER server Public IPv4: ")"
   echo
   count="$(ask_int_range "How many VPN IP pairs do you want? (1-10): " 1 10)"
+
+  # Summary (prevents user confusion)
+  read -r local_octet remote_octet < <(expected_octets_for_role "$role")
   echo
+  echo -e "${BLU}Summary:${NC}"
+  echo "  This server LOCAL IPs will end with .${local_octet}"
+  echo "  Remote IPs will end with .${remote_octet}"
+  echo "  First pair: 10.50.50.${local_octet} <-> 10.50.50.${remote_octet}"
+  echo
+
   read -r -s -p "Enter PSK (will be saved on server): " psk
   echo
 
@@ -349,7 +397,6 @@ fi
 
 ok=1
 while read -r lip rip; do
-  # ensure local ip exists
   if ! ip -4 addr show dev lo | grep -qE "\\b${lip}/32\\b"; then
     ip addr add "${lip}/32" dev lo >/dev/null 2>&1 || true
   fi
@@ -365,7 +412,10 @@ done < "${IP_LIST_FILE}"
 if [[ "${ok}" -eq 0 ]]; then
   systemctl restart strongswan || true
   swanctl --load-all >/dev/null 2>&1 || true
-  swanctl --initiate --ike delta >/dev/null 2>&1 || true
+  # initiate children from config
+  for child in $(awk '/^[[:space:]]*link[0-9]+[[:space:]]*{/ {gsub("{","",$1); print $1}' /etc/swanctl/swanctl.conf); do
+    swanctl --initiate --child "$child" >/dev/null 2>&1 || true
+  done
 fi
 EOF
   chmod +x /usr/local/bin/delta-vpn-healthcheck.sh
@@ -404,7 +454,9 @@ set -euo pipefail
 systemctl restart strongswan || true
 swanctl --load-all >/dev/null 2>&1 || true
 swanctl --terminate --ike delta >/dev/null 2>&1 || true
-swanctl --initiate --ike delta >/dev/null 2>&1 || true
+for child in $(awk '/^[[:space:]]*link[0-9]+[[:space:]]*{/ {gsub("{","",$1); print $1}' /etc/swanctl/swanctl.conf); do
+  swanctl --initiate --child "$child" >/dev/null 2>&1 || true
+done
 EOF
   chmod +x /usr/local/bin/delta-vpn-restart.sh
 }
@@ -469,7 +521,6 @@ remove_all() {
         /usr/local/bin/delta-vpn-healthcheck.sh /usr/local/bin/delta-vpn-restart.sh
   systemctl daemon-reload || true
 
-  # Always clean any 10.50.* local IPs even if list file is missing
   cleanup_lo_ips
 
   swanctl --terminate --ike delta >/dev/null 2>&1 || true
