@@ -4,10 +4,10 @@ set -euo pipefail
 # Atomic simple IPsec (StrongSwan IKEv2) installer
 # Ubuntu 20.04+ | Policy-based /32 <-> /32
 # Iran tunnel IP:    10.50.50.1/32
-# Foreign tunnel IP: 10.50.50.2/32
+# kharej tunnel IP: 10.50.50.2/32
 
 IRAN_TUN_IP="10.50.50.1/32"
-FOREIGN_TUN_IP="10.50.50.2/32"
+kharej_TUN_IP="10.50.50.2/32"
 CONN_NAME="atomic-s2s"
 
 need_root() {
@@ -131,12 +131,12 @@ main() {
   echo "== Atomic StrongSwan S2S installer =="
   echo "This script sets up IKEv2 IPsec tunnel between:"
   echo "  Iran:    ${IRAN_TUN_IP}"
-  echo "  Foreign: ${FOREIGN_TUN_IP}"
+  echo "  kharej: ${kharej_TUN_IP}"
   echo
 
   local role=""
-  while [[ "$role" != "iran" && "$role" != "foreign" ]]; do
-    read -rp "Role of THIS server? (iran/foreign): " role
+  while [[ "$role" != "iran" && "$role" != "kharej" ]]; do
+    read -rp "Role of THIS server? (iran/kharej): " role
     role="${role,,}"
   done
 
@@ -158,14 +158,14 @@ main() {
 
   if [[ "$role" == "iran" ]]; then
     ensure_lo_ip "${IRAN_TUN_IP}"
-    echo "[+] Writing /etc/ipsec.conf (iran -> foreign)..."
-    write_ipsec_conf "${LEFT_PUB}" "${RIGHT_PUB}" "${IRAN_TUN_IP}" "${FOREIGN_TUN_IP}"
+    echo "[+] Writing /etc/ipsec.conf (iran -> kharej)..."
+    write_ipsec_conf "${LEFT_PUB}" "${RIGHT_PUB}" "${IRAN_TUN_IP}" "${kharej_TUN_IP}"
     echo "[+] Writing /etc/ipsec.secrets ..."
     write_ipsec_secrets "${LEFT_PUB}" "${RIGHT_PUB}" "${PSK}"
   else
-    ensure_lo_ip "${FOREIGN_TUN_IP}"
-    echo "[+] Writing /etc/ipsec.conf (foreign -> iran)..."
-    write_ipsec_conf "${LEFT_PUB}" "${RIGHT_PUB}" "${FOREIGN_TUN_IP}" "${IRAN_TUN_IP}"
+    ensure_lo_ip "${kharej_TUN_IP}"
+    echo "[+] Writing /etc/ipsec.conf (kharej -> iran)..."
+    write_ipsec_conf "${LEFT_PUB}" "${RIGHT_PUB}" "${kharej_TUN_IP}" "${IRAN_TUN_IP}"
     echo "[+] Writing /etc/ipsec.secrets ..."
     write_ipsec_secrets "${LEFT_PUB}" "${RIGHT_PUB}" "${PSK}"
   fi
@@ -182,7 +182,7 @@ main() {
   else
     echo "  ping -c 3 10.50.50.1"
   fi
-  systemctl restart strongswan-starter
+systemctl restart strongswan-starter 2>/dev/null || systemctl restart strongswan
 }
 
 main "$@"
