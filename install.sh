@@ -186,7 +186,7 @@ load_strongswan_safe() {
     exit 1
   fi
 
-  if ! timeout 12 swanctl --load-all -v; then
+  if ! timeout 12 swanctl --load-all --debug 1; then
     echo -e "${RED}ERROR:${NC} swanctl --load-all failed (timeout or error)."
     echo "Check logs: sudo journalctl -u strongswan -n 200 --no-pager"
     exit 1
