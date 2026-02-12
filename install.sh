@@ -191,10 +191,12 @@ extract_children_from_conf() {
 
 load_strongswan_safe() {
   echo -e "${BLU}[*] Loading configuration...${NC}"
+
+  # restart quickly
   systemctl restart strongswan >/dev/null 2>&1 || true
 
-  # wait for VICI socket
-  for _ in {1..8}; do
+  # wait for VICI socket (max 12s, but usually <1s)
+  for _ in {1..12}; do
     [[ -S /run/charon.vici || -S /var/run/charon.vici ]] && break
     sleep 1
   done
@@ -205,19 +207,26 @@ load_strongswan_safe() {
     exit 1
   fi
 
-  # strongSwan 5.9.5 requires debug value
-  if ! timeout 12 swanctl --load-all --debug 1; then
-    echo -e "${RED}ERROR:${NC} swanctl --load-all failed."
-    echo "Check logs: sudo journalctl -u strongswan -n 200 --no-pager"
-    exit 1
+  # FAST path (no debug output)
+  if timeout 12 swanctl --load-all >/dev/null 2>&1; then
+    :
+  else
+    # SLOW path: show debug only on failure
+    echo -e "${YLW}[!] Load failed, retrying with debug output...${NC}"
+    timeout 20 swanctl --load-all --debug 1 || {
+      echo -e "${RED}ERROR:${NC} swanctl --load-all failed."
+      echo "Check logs: sudo journalctl -u strongswan -n 200 --no-pager"
+      exit 1
+    }
   fi
 
-  # initiate children explicitly (prevents IKE-only)
+  # initiate children explicitly
   local child
   for child in $(extract_children_from_conf); do
     swanctl --initiate --child "$child" >/dev/null 2>&1 || true
   done
 }
+
 
 # ---------- main config ----------
 write_config() {
