@@ -16,7 +16,7 @@ AUTO_TIMER="/etc/systemd/system/delta-vpn-auto.timer"
 MAN_SERVICE="/etc/systemd/system/delta-vpn-manual.service"
 MAN_TIMER="/etc/systemd/system/delta-vpn-manual.timer"
 
-RED="\033[0;31m"; GRN="\033[0;32m"; YLW="\033[1;33m"; BLU="\033[0;34m"; CYA="\033[0;36m"; NC="\033[0m"
+RED="\033[0;31m"; GRN="\033[0;32m"; YLW="\033[1;33m"; BLU="\033[0;34m"; CYA="\033[0;36m"; MAG="\033[0;35m"; WHT="\033[1;37m"; NC="\033[0m"
 
 require_root() {
   if [[ "${EUID}" -ne 0 ]]; then
@@ -92,14 +92,14 @@ ask_role() {
   # IMPORTANT: menu text goes to stderr so it does NOT pollute captured output.
   local c
   while true; do
-    echo "Select server location:" >&2
-    echo "  1) Iran" >&2
-    echo "  2) Abroad" >&2
+    echo -e "${WHT}Select server location:${NC}" >&2
+    echo -e "  ${GRN}1) Iran${NC}" >&2
+    echo -e "  ${CYA}2) Abroad${NC}" >&2
     read -r -p "Enter choice [1-2]: " c
     case "$c" in
       1) echo "iran"; return 0 ;;
       2) echo "abroad"; return 0 ;;
-      *) echo "Invalid choice." >&2; echo >&2 ;;
+      *) echo -e "${RED}Invalid choice.${NC}" >&2; echo >&2 ;;
     esac
   done
 }
@@ -115,7 +115,7 @@ ask_ipv4() {
         echo "$ip"; return 0
       fi
     fi
-    echo "Invalid IPv4. Try again." >&2
+    echo -e "${RED}Invalid IPv4. Try again.${NC}" >&2
   done
 }
 
@@ -127,7 +127,7 @@ ask_int_range() {
     if [[ "$n" =~ ^[0-9]+$ ]] && (( n>=min && n<=max )); then
       echo "$n"; return 0
     fi
-    echo "Enter a number between ${min} and ${max}." >&2
+    echo -e "${RED}Enter a number between ${min} and ${max}.${NC}" >&2
   done
 }
 
@@ -227,7 +227,6 @@ load_strongswan_safe() {
   done
 }
 
-
 # ---------- main config ----------
 write_config() {
   local role="$1" remote_pub="$2" count="$3" psk="$4"
@@ -280,7 +279,6 @@ connections {
 
     children {
 EOF
-
 
   for ((i=0; i<count; i++)); do
     local net=$((50 + i*10))
@@ -476,11 +474,11 @@ EOF
 
 restart_menu() {
   banner
-  echo "Restart / Recovery:"
-  echo "  1) Automatic (every 1 minute health-check)"
-  echo "  2) Scheduled (restart every N hours)"
-  echo "  3) Disable all"
-  echo "  0) Back"
+  echo -e "${MAG}Restart / Recovery:${NC}"
+  echo -e "  ${GRN}1) Automatic${NC} ${WHT}(every 1 minute health-check)${NC}"
+  echo -e "  ${CYA}2) Scheduled${NC} ${WHT}(restart every N hours)${NC}"
+  echo -e "  ${YLW}3) Disable all${NC}"
+  echo -e "  ${RED}0) Back${NC}"
   echo
 
   local c
@@ -513,7 +511,7 @@ restart_menu() {
       pause
       ;;
     0) ;;
-    *) echo "Invalid choice."; pause ;;
+    *) echo -e "${RED}Invalid choice.${NC}"; pause ;;
   esac
 }
 
@@ -573,17 +571,22 @@ list_pairs() {
   pause
 }
 
-main_menu() {
+# =========================
+# NEW MENUS / FEATURES
+# =========================
+
+menu_tunell_kosmos() {
   while true; do
     banner
-    echo -e "${BLU}Public IPv4:${NC} $(get_public_ip)"
+    echo -e "${MAG}tunell kosmos${NC}"
+    echo -e "${WHT}Public IPv4:${NC} ${YLW}$(get_public_ip)${NC}"
     echo
-    echo "1) Install / Update"
-    echo "2) Restart / Recovery"
-    echo "3) Remove"
-    echo "4) Status"
-    echo "5) List"
-    echo "0) Exit"
+    echo -e "  ${GRN}1) Install / Update${NC}"
+    echo -e "  ${CYA}2) Restart / Recovery${NC}"
+    echo -e "  ${RED}3) Remove${NC}"
+    echo -e "  ${BLU}4) Status${NC}"
+    echo -e "  ${YLW}5) List${NC}"
+    echo -e "  ${WHT}0) Back${NC}"
     echo
     local c
     read -r -p "Select an option: " c
@@ -593,8 +596,298 @@ main_menu() {
       3) remove_all ;;
       4) show_status ;;
       5) list_pairs ;;
+      0) return ;;
+      *) echo -e "${RED}Invalid option.${NC}"; pause ;;
+    esac
+  done
+}
+
+enable_rc_local_systemd_if_needed() {
+  # Ubuntu 22/24: rc.local not enabled by default. Create rc-local.service if missing.
+  if [[ ! -f /etc/systemd/system/rc-local.service ]]; then
+    cat >/etc/systemd/system/rc-local.service <<'EOF'
+[Unit]
+Description=/etc/rc.local Compatibility
+ConditionPathExists=/etc/rc.local
+After=network.target
+
+[Service]
+Type=forking
+ExecStart=/etc/rc.local start
+TimeoutSec=0
+StandardOutput=tty
+RemainAfterExit=yes
+SysVStartPriority=99
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload >/dev/null 2>&1 || true
+  fi
+
+  systemctl enable rc-local.service >/dev/null 2>&1 || true
+}
+
+kosmos1_install() {
+  banner
+  echo -e "${MAG}tunell kosmos 1${NC}"
+  echo -e "${WHT}This server Public IPv4:${NC} ${YLW}$(get_public_ip)${NC}"
+  echo
+
+  local role other_ip local_ip
+  role="$(ask_role)"
+  local_ip="$(get_public_ip)"
+  other_ip="$(ask_ipv4 "Enter the OTHER server Public IPv4: ")"
+
+  if [[ "$local_ip" == "Unknown" ]]; then
+    echo -e "${RED}ERROR:${NC} Could not detect local public IP. Please ensure IPv4 connectivity."
+    pause
+    return
+  fi
+
+  echo -e "${BLU}[*] Writing /etc/rc.local ...${NC}"
+
+  if [[ "$role" == "iran" ]]; then
+    cat >/etc/rc.local <<EOF
+#!/bin/bash
+ip tunnel add gre1 mode gre remote ${other_ip} local ${local_ip} ttl 255
+ip link set gre1 mtu 1420
+ip link set gre1 up
+ip addr add 10.10.10.1/30 dev gre1
+nohup ping 10.10.10.2 >/dev/null 2>&1 &
+exit 0
+EOF
+  else
+    cat >/etc/rc.local <<EOF
+#!/bin/bash
+ip tunnel add gre1 mode gre remote ${other_ip} local ${local_ip} ttl 255
+ip link set gre1 mtu 1420
+ip link set gre1 up
+ip addr add 10.10.10.2/30 dev gre1
+nohup ping 10.10.10.1 >/dev/null 2>&1 &
+exit 0
+EOF
+  fi
+
+  chmod +x /etc/rc.local
+  enable_rc_local_systemd_if_needed
+
+  echo -e "${BLU}[*] Applying now...${NC}"
+  # clean any old gre1 first (best effort)
+  ip link set gre1 down >/dev/null 2>&1 || true
+  ip tunnel del gre1 >/dev/null 2>&1 || true
+
+  bash /etc/rc.local >/dev/null 2>&1 || true
+
+  echo
+  echo -e "${GRN}[OK] tunell kosmos 1 installed.${NC}"
+  echo -e "${YLW}Tip:${NC} Use Inquiry to check gre1 status."
+  pause
+}
+
+kosmos1_remove() {
+  banner
+  echo -e "${MAG}tunell kosmos 1${NC}"
+  echo
+
+  echo -e "${BLU}[*] Removing gre1 ...${NC}"
+  ip link set gre1 down >/dev/null 2>&1 || true
+  ip tunnel del gre1 >/dev/null 2>&1 || true
+
+  # remove from rc.local (simple: disable file content if it contains gre1)
+  if [[ -f /etc/rc.local ]] && grep -q "ip tunnel add gre1" /etc/rc.local; then
+    cat >/etc/rc.local <<'EOF'
+#!/bin/bash
+exit 0
+EOF
+    chmod +x /etc/rc.local
+  fi
+
+  echo -e "${GRN}[OK] tunell kosmos 1 removed.${NC}"
+  pause
+}
+
+menu_kosmos1() {
+  while true; do
+    banner
+    echo -e "${MAG}tunell kosmos 1${NC}"
+    echo -e "${WHT}Public IPv4:${NC} ${YLW}$(get_public_ip)${NC}"
+    echo
+    echo -e "  ${GRN}1) Install${NC}"
+    echo -e "  ${RED}2) Remove${NC}"
+    echo -e "  ${WHT}0) Back${NC}"
+    echo
+    local c
+    read -r -p "Select an option: " c
+    case "$c" in
+      1) kosmos1_install ;;
+      2) kosmos1_remove ;;
+      0) return ;;
+      *) echo -e "${RED}Invalid option.${NC}"; pause ;;
+    esac
+  done
+}
+
+backhaul_install() {
+  banner
+  echo -e "${MAG}backhaul${NC}"
+  echo
+  echo -e "${BLU}[*] Running installer...${NC}"
+  bash <(curl -Ls --ipv4 https://raw.githubusercontent.com/wafflenoodle/zenith-stash/refs/heads/main/backhaul.sh)
+  echo
+  echo -e "${GRN}[OK] backhaul install command finished.${NC}"
+  pause
+}
+
+backhaul_service_setup() {
+  banner
+  echo -e "${MAG}backhaul${NC}"
+  echo -e "${BLU}[*] Creating systemd service...${NC}"
+  cat >/etc/systemd/system/backhaul.service <<'EOF'
+[Unit]
+Description=Backhaul Reverse Tunnel Service
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/root/backhaul/backhaul -c /root/backhaul/config.toml
+Restart=always
+RestartSec=3
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  systemctl daemon-reload
+  systemctl enable backhaul.service
+  systemctl start backhaul.service
+
+  echo
+  echo -e "${GRN}[OK] backhaul.service enabled and started.${NC}"
+  pause
+}
+
+menu_backhaul() {
+  while true; do
+    banner
+    echo -e "${MAG}backhaul${NC}"
+    echo
+    echo -e "  ${GRN}1) Install${NC}"
+    echo -e "  ${CYA}2) Cron Job (systemd)${NC}"
+    echo -e "  ${WHT}0) Back${NC}"
+    echo
+    local c
+    read -r -p "Select an option: " c
+    case "$c" in
+      1) backhaul_install ;;
+      2) backhaul_service_setup ;;
+      0) return ;;
+      *) echo -e "${RED}Invalid option.${NC}"; pause ;;
+    esac
+  done
+}
+
+rathole_install() {
+  banner
+  echo -e "${MAG}rathole${NC}"
+  echo
+  echo -e "${BLU}[*] Running installer...${NC}"
+  bash <(curl -Ls --ipv4 https://raw.githubusercontent.com/Musixal/rathole-tunnel/main/rathole_v2.sh)
+  echo
+  echo -e "${GRN}[OK] rathole install command finished.${NC}"
+  pause
+}
+
+menu_rathole() {
+  while true; do
+    banner
+    echo -e "${MAG}rathole${NC}"
+    echo
+    echo -e "  ${GRN}1) Install${NC}"
+    echo -e "  ${WHT}0) Back${NC}"
+    echo
+    local c
+    read -r -p "Select an option: " c
+    case "$c" in
+      1) rathole_install ;;
+      0) return ;;
+      *) echo -e "${RED}Invalid option.${NC}"; pause ;;
+    esac
+  done
+}
+
+inquiry_all() {
+  banner
+  echo -e "${MAG}Inquiry${NC}"
+  echo -e "${WHT}Public IPv4:${NC} ${YLW}$(get_public_ip)${NC}"
+  echo
+
+  echo -e "${CYA}== tunell kosmos (StrongSwan) ==${NC}"
+  if cmd_exists swanctl; then
+    swanctl --list-sas 2>/dev/null || echo "(no SAs / swanctl error)"
+  else
+    echo "(swanctl not found)"
+  fi
+  echo
+
+  echo -e "${CYA}== tunell kosmos 1 (GRE gre1) ==${NC}"
+  if ip tunnel show 2>/dev/null | grep -q "^gre1"; then
+    ip tunnel show gre1 || true
+    ip link show gre1 || true
+    ip -4 addr show dev gre1 || true
+  else
+    echo "(gre1 not present)"
+  fi
+  echo
+
+  echo -e "${CYA}== backhaul.service ==${NC}"
+  if systemctl list-unit-files | grep -q "^backhaul\.service"; then
+    systemctl --no-pager --full status backhaul.service || true
+  else
+    echo "(backhaul.service not installed)"
+  fi
+  echo
+
+  echo -e "${CYA}== rathole ==${NC}"
+  # best-effort checks (script may create its own service name)
+  if systemctl list-units --type=service --all | grep -qi rathole; then
+    systemctl list-units --type=service --all | grep -i rathole || true
+  elif pgrep -af rathole >/dev/null 2>&1; then
+    pgrep -af rathole || true
+  else
+    echo "(no rathole service/process detected)"
+  fi
+
+  echo
+  pause
+}
+
+# =========================
+# MAIN MENU (NEW)
+# =========================
+main_menu() {
+  while true; do
+    banner
+    echo -e "${WHT}Public IPv4:${NC} ${YLW}$(get_public_ip)${NC}"
+    echo
+    echo -e "  ${MAG}1) tunell kosmos${NC}"
+    echo -e "  ${CYA}2) tunell kosmos 1${NC}"
+    echo -e "  ${GRN}3) backhaul${NC}"
+    echo -e "  ${BLU}4) rathole${NC}"
+    echo -e "  ${YLW}5) Inquiry${NC}"
+    echo -e "  ${RED}0) Exit${NC}"
+    echo
+    local c
+    read -r -p "Select an option: " c
+    case "$c" in
+      1) menu_tunell_kosmos ;;
+      2) menu_kosmos1 ;;
+      3) menu_backhaul ;;
+      4) menu_rathole ;;
+      5) inquiry_all ;;
       0) exit 0 ;;
-      *) echo "Invalid option."; pause ;;
+      *) echo -e "${RED}Invalid option.${NC}"; pause ;;
     esac
   done
 }
