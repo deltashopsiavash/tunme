@@ -41,16 +41,22 @@ get_public_ip() {
 
 banner() {
   clear
-  echo -e "${MAG}"
-  cat <<'EOF'
-👅👅👅👅👅👅👅👅👅👅👅👅👅👅👅👅👅👅👅👅
-👅        DELTA VPN        👅
-👅   telegram: @delta_vpn12 👅
-👅👅👅👅👅👅👅👅👅👅👅👅👅👅👅👅👅👅👅👅
-EOF
-  echo -e "${NC}"
+
+  for i in {1..5}; do
+    clear
+    printf "\n%.0s" $(seq 1 $i)
+    echo -e "${MAG}             👅${NC}"
+    sleep 0.05
+  done
+
+  clear
+  echo
+  echo -e "${MAG}             👅${NC}"
+  echo -e "${WHT}        DELTA VPN${NC}"
+  echo -e "${CYA}     telegram: @delta_vpn12${NC}"
   echo
 }
+
 
 
 ensure_dirs() {
