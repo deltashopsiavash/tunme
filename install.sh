@@ -91,19 +91,20 @@ open_firewall() {
 read_choice() { local p="$1"; local c; read -r -p "${p}" c; echo "$c"; }
 
 ask_role() {
-  echo "Select server location:"
-  echo "  1) Iran"
-  echo "  2) Abroad"
   local c
   while true; do
-    c="$(read_choice "Enter choice [1-2]: ")"
+    printf "Select server location:\n"
+    printf "  1) Iran\n"
+    printf "  2) Abroad\n"
+    read -r -p "Enter choice [1-2]: " c
     case "$c" in
-      1) echo "iran"; return ;;
-      2) echo "abroad"; return ;;
-      *) echo "Invalid choice." ;;
+      1) printf "%s" "iran"; return 0 ;;
+      2) printf "%s" "abroad"; return 0 ;;
+      *) echo "Invalid choice."; echo ;;
     esac
   done
 }
+
 
 ask_ipv4() {
   local prompt="$1"
