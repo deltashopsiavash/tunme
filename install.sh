@@ -64,12 +64,6 @@ EOF
   echo
 }
 
-
-
-
-
-
-
 ensure_dirs() {
   mkdir -p "${STATE_DIR}" "${SWAN_DIR}"
   chmod 700 "${STATE_DIR}"
