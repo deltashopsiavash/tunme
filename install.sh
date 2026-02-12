@@ -254,8 +254,15 @@ connections {
     version = 2
     remote_addrs = ${remote_pub}
 
-    local  { auth = psk; id = %any; }
-    remote { auth = psk; id = %any; }
+    local {
+      auth = psk
+      id = %any
+    }
+
+    remote {
+      auth = psk
+      id = %any
+    }
 
     dpd_delay = 30s
     dpd_timeout = 120s
@@ -264,6 +271,7 @@ connections {
 
     children {
 EOF
+
 
   for ((i=0; i<count; i++)); do
     local net=$((50 + i*10))
