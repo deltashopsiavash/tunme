@@ -56,8 +56,7 @@ EOF
 }
 
 ensure_dirs() {
-  mkdir -p "${STATE_DIR}"
-  mkdir -p "${SWAN_DIR}"
+  mkdir -p "${STATE_DIR}" "${SWAN_DIR}"
   chmod 700 "${STATE_DIR}"
 }
 
@@ -66,7 +65,7 @@ install_packages() {
   apt-get update -y
   apt-get install -y strongswan strongswan-swanctl iproute2 curl
   systemctl enable strongswan >/dev/null 2>&1 || true
-  systemctl start strongswan >/dev/null 2>&1 || true
+  systemctl start strongswan  >/dev/null 2>&1 || true
 }
 
 enable_sysctls() {
@@ -88,23 +87,22 @@ open_firewall() {
   fi
 }
 
-read_choice() { local p="$1"; local c; read -r -p "${p}" c; echo "$c"; }
-
+# ---------- input helpers ----------
 ask_role() {
+  # IMPORTANT: menu text goes to stderr so it does NOT pollute captured output.
   local c
   while true; do
-    printf "Select server location:\n"
-    printf "  1) Iran\n"
-    printf "  2) Abroad\n"
+    echo "Select server location:" >&2
+    echo "  1) Iran" >&2
+    echo "  2) Abroad" >&2
     read -r -p "Enter choice [1-2]: " c
     case "$c" in
-      1) printf "%s" "iran"; return 0 ;;
-      2) printf "%s" "abroad"; return 0 ;;
-      *) echo "Invalid choice."; echo ;;
+      1) echo "iran"; return 0 ;;
+      2) echo "abroad"; return 0 ;;
+      *) echo "Invalid choice." >&2; echo >&2 ;;
     esac
   done
 }
-
 
 ask_ipv4() {
   local prompt="$1"
@@ -114,10 +112,10 @@ ask_ipv4() {
     if [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
       IFS='.' read -r a b c d <<<"$ip"
       if ((a<=255 && b<=255 && c<=255 && d<=255)); then
-        echo "$ip"; return
+        echo "$ip"; return 0
       fi
     fi
-    echo "Invalid IPv4. Try again."
+    echo "Invalid IPv4. Try again." >&2
   done
 }
 
@@ -127,21 +125,39 @@ ask_int_range() {
   while true; do
     read -r -p "${prompt}" n
     if [[ "$n" =~ ^[0-9]+$ ]] && (( n>=min && n<=max )); then
-      echo "$n"; return
+      echo "$n"; return 0
     fi
-    echo "Enter a number between ${min} and ${max}."
+    echo "Enter a number between ${min} and ${max}." >&2
   done
 }
 
+# ---------- role logic ----------
 expected_octets_for_role() {
   local role="$1"
   if [[ "$role" == "iran" ]]; then
-    echo "1 2"   # local_octet remote_octet
+    echo "1 2"   # local remote
   else
     echo "2 1"
   fi
 }
 
+detect_suggested_location() {
+  # Heuristic:
+  # - private gateway (RFC1918) usually cloud/VPC => Abroad
+  # - public gateway often routed DC => Iran
+  local gw
+  gw="$(ip -4 route show default 2>/dev/null | awk '{print $3}' | head -n1)"
+  if [[ -z "${gw}" ]]; then
+    echo "unknown"; return 0
+  fi
+  if [[ "${gw}" =~ ^10\.|^192\.168\.|^172\.(1[6-9]|2[0-9]|3[0-1])\. ]]; then
+    echo "abroad"
+  else
+    echo "iran"
+  fi
+}
+
+# ---------- network setup ----------
 cleanup_lo_ips() {
   ip -4 addr show dev lo | awk '/10\.50\./ {print $2}' | while read -r cidr; do
     ip addr del "$cidr" dev lo >/dev/null 2>&1 || true
@@ -152,7 +168,7 @@ enforce_lo_ips_for_role() {
   local role="$1" count="$2"
   read -r local_octet _ < <(expected_octets_for_role "$role")
 
-  # Always clean to prevent mixed roles / both .2 issue
+  # ALWAYS clean to avoid mixed role or "both .2"
   cleanup_lo_ips
 
   for ((i=0; i<count; i++)); do
@@ -161,33 +177,15 @@ enforce_lo_ips_for_role() {
     ip addr add "${lip}/32" dev lo >/dev/null 2>&1 || true
   done
 
-  # Sanity check
+  # sanity check
   local expected_first="10.50.50.${local_octet}"
   if ! ip -4 addr show dev lo | grep -qE "\\b${expected_first}/32\\b"; then
-    echo -e "${RED}ERROR:${NC} Loopback sanity check failed."
-    echo "Expected ${expected_first}/32 on lo but did not find it."
+    echo -e "${RED}ERROR:${NC} Loopback sanity check failed (expected ${expected_first}/32 on lo)."
     exit 1
   fi
 }
 
-detect_suggested_location() {
-  # Heuristic:
-  # If default gateway is private (RFC1918), usually cloud/VPC => Abroad
-  # If default gateway is public, often Iran/DC public routed => Iran
-  local gw
-  gw="$(ip -4 route show default 2>/dev/null | awk '{print $3}' | head -n1)"
-  if [[ -z "${gw}" ]]; then
-    echo "unknown"; return
-  fi
-  if [[ "${gw}" =~ ^10\.|^192\.168\.|^172\.(1[6-9]|2[0-9]|3[0-1])\. ]]; then
-    echo "abroad"
-  else
-    echo "iran"
-  fi
-}
-
 extract_children_from_conf() {
-  # Prints child names like link50 link60...
   awk '/^[[:space:]]*link[0-9]+[[:space:]]*{/ {gsub("{","",$1); print $1}' "${SWAN_CONF}" 2>/dev/null || true
 }
 
@@ -195,7 +193,8 @@ load_strongswan_safe() {
   echo -e "${BLU}[*] Loading configuration...${NC}"
   systemctl restart strongswan >/dev/null 2>&1 || true
 
-  for i in {1..8}; do
+  # wait for VICI socket
+  for _ in {1..8}; do
     [[ -S /run/charon.vici || -S /var/run/charon.vici ]] && break
     sleep 1
   done
@@ -206,22 +205,23 @@ load_strongswan_safe() {
     exit 1
   fi
 
+  # strongSwan 5.9.5 requires debug value
   if ! timeout 12 swanctl --load-all --debug 1; then
-    echo -e "${RED}ERROR:${NC} swanctl --load-all failed (timeout or error)."
+    echo -e "${RED}ERROR:${NC} swanctl --load-all failed."
     echo "Check logs: sudo journalctl -u strongswan -n 200 --no-pager"
     exit 1
   fi
 
-  # Initiate each child explicitly (prevents IKE-only)
+  # initiate children explicitly (prevents IKE-only)
   local child
   for child in $(extract_children_from_conf); do
     swanctl --initiate --child "$child" >/dev/null 2>&1 || true
   done
 }
 
+# ---------- main config ----------
 write_config() {
   local role="$1" remote_pub="$2" count="$3" psk="$4"
-
   read -r local_octet remote_octet < <(expected_octets_for_role "$role")
 
   # Save state
@@ -234,11 +234,10 @@ REMOTE_OCTET=${remote_octet}
 EOF
   chmod 600 "${STATE_DIR}/state.env"
 
-  # Enforce correct local IPs (ANTI-MISTAKE CORE)
+  # Set local loopback IPs correctly (ANTI-MISTAKE)
   enforce_lo_ips_for_role "$role" "$count"
 
-  # Build ip pairs file (fresh)
-  rm -f "${IP_LIST_FILE}" >/dev/null 2>&1 || true
+  # Build IP pairs list (fresh)
   : > "${IP_LIST_FILE}"
   for ((i=0; i<count; i++)); do
     local net=$((50 + i*10))
@@ -255,14 +254,8 @@ connections {
     version = 2
     remote_addrs = ${remote_pub}
 
-    local {
-      auth = psk
-      id = %any
-    }
-    remote {
-      auth = psk
-      id = %any
-    }
+    local  { auth = psk; id = %any; }
+    remote { auth = psk; id = %any; }
 
     dpd_delay = 30s
     dpd_timeout = 120s
@@ -303,8 +296,16 @@ EOF
   sed -i "s|__PSK__|${psk//\\/\\\\}|g" "${SWAN_CONF}"
   chmod 600 "${SWAN_CONF}"
 
-  load_strongswan_safe
+  # Final self-check: make sure first pair is correct orientation
+  local expected_local="10.50.50.${local_octet}/32"
+  local expected_remote="10.50.50.${remote_octet}/32"
+  if ! grep -q "local_ts = ${expected_local}" "${SWAN_CONF}" || ! grep -q "remote_ts = ${expected_remote}" "${SWAN_CONF}"; then
+    echo -e "${RED}ERROR:${NC} Config orientation sanity check failed."
+    echo "Expected: local_ts=${expected_local} remote_ts=${expected_remote}"
+    exit 1
+  fi
 
+  load_strongswan_safe
   echo -e "${GRN}[OK] Configuration applied.${NC}"
 }
 
@@ -318,12 +319,11 @@ install_or_update() {
   enable_sysctls
   open_firewall
 
-  local role remote_pub count psk
-  role="$(ask_role)"
+  local role suggested remote_pub count psk local_octet remote_octet
 
-  # Role Guard (anti mistake)
-  local suggested
+  role="$(ask_role)"
   suggested="$(detect_suggested_location)"
+
   if [[ "${suggested}" != "unknown" && "${role}" != "${suggested}" ]]; then
     echo
     echo -e "${RED}WARNING:${NC} Your selection looks wrong for this server."
@@ -332,7 +332,7 @@ install_or_update() {
     echo -e "${YLW}If you continue, both servers may end up with the same .1/.2 side and it will NOT work.${NC}"
     echo
     local ok
-    ok="$(read_choice "Type YES to continue anyway: ")"
+    read -r -p "Type YES to continue anyway: " ok
     [[ "$ok" == "YES" ]] || return
   fi
 
@@ -341,7 +341,6 @@ install_or_update() {
   echo
   count="$(ask_int_range "How many VPN IP pairs do you want? (1-10): " 1 10)"
 
-  # Summary (prevents user confusion)
   read -r local_octet remote_octet < <(expected_octets_for_role "$role")
   echo
   echo -e "${BLU}Summary:${NC}"
@@ -359,6 +358,7 @@ install_or_update() {
   pause
 }
 
+# ---------- restart / recovery ----------
 write_auto_units() {
   cat > "${AUTO_SERVICE}" <<'EOF'
 [Unit]
@@ -389,19 +389,13 @@ EOF
 #!/usr/bin/env bash
 set -euo pipefail
 
-STATE_DIR="/etc/delta-vpn"
-IP_LIST_FILE="${STATE_DIR}/ip_pairs.list"
+IP_LIST_FILE="/etc/delta-vpn/ip_pairs.list"
 
-if [[ ! -f "${IP_LIST_FILE}" ]]; then
-  exit 0
-fi
+[[ -f "${IP_LIST_FILE}" ]] || exit 0
 
 ok=1
 while read -r lip rip; do
-  if ! ip -4 addr show dev lo | grep -qE "\\b${lip}/32\\b"; then
-    ip addr add "${lip}/32" dev lo >/dev/null 2>&1 || true
-  fi
-
+  ip -4 addr show dev lo | grep -qE "\\b${lip}/32\\b" || ip addr add "${lip}/32" dev lo >/dev/null 2>&1 || true
   if ping -c 1 -W 1 -I "${lip}" "${rip}" >/dev/null 2>&1; then
     :
   else
@@ -413,12 +407,12 @@ done < "${IP_LIST_FILE}"
 if [[ "${ok}" -eq 0 ]]; then
   systemctl restart strongswan || true
   swanctl --load-all >/dev/null 2>&1 || true
-  # initiate children from config
   for child in $(awk '/^[[:space:]]*link[0-9]+[[:space:]]*{/ {gsub("{","",$1); print $1}' /etc/swanctl/swanctl.conf); do
     swanctl --initiate --child "$child" >/dev/null 2>&1 || true
   done
 fi
 EOF
+
   chmod +x /usr/local/bin/delta-vpn-healthcheck.sh
 }
 
@@ -459,6 +453,7 @@ for child in $(awk '/^[[:space:]]*link[0-9]+[[:space:]]*{/ {gsub("{","",$1); pri
   swanctl --initiate --child "$child" >/dev/null 2>&1 || true
 done
 EOF
+
   chmod +x /usr/local/bin/delta-vpn-restart.sh
 }
 
@@ -472,7 +467,7 @@ restart_menu() {
   echo
 
   local c
-  c="$(read_choice "Enter choice: ")"
+  read -r -p "Enter choice: " c
   case "$c" in
     1)
       write_auto_units
@@ -492,7 +487,7 @@ restart_menu() {
       pause
       ;;
     3)
-      systemctl disable --now delta-vpn-auto.timer >/dev/null 2>&1 || true
+      systemctl disable --now delta-vpn-auto.timer   >/dev/null 2>&1 || true
       systemctl disable --now delta-vpn-manual.timer >/dev/null 2>&1 || true
       rm -f "${AUTO_SERVICE}" "${AUTO_TIMER}" "${MAN_SERVICE}" "${MAN_TIMER}" \
             /usr/local/bin/delta-vpn-healthcheck.sh /usr/local/bin/delta-vpn-restart.sh
@@ -509,27 +504,22 @@ remove_all() {
   banner
   echo -e "${YLW}This will remove DELTA VPN configuration and related services.${NC}"
   local c
-  c="$(read_choice "Type YES to continue: ")"
-  if [[ "$c" != "YES" ]]; then
-    echo "Canceled."
-    pause
-    return
-  fi
+  read -r -p "Type YES to continue: " c
+  [[ "$c" == "YES" ]] || { echo "Canceled."; pause; return; }
 
-  systemctl disable --now delta-vpn-auto.timer >/dev/null 2>&1 || true
+  systemctl disable --now delta-vpn-auto.timer   >/dev/null 2>&1 || true
   systemctl disable --now delta-vpn-manual.timer >/dev/null 2>&1 || true
   rm -f "${AUTO_SERVICE}" "${AUTO_TIMER}" "${MAN_SERVICE}" "${MAN_TIMER}" \
         /usr/local/bin/delta-vpn-healthcheck.sh /usr/local/bin/delta-vpn-restart.sh
   systemctl daemon-reload || true
 
   cleanup_lo_ips
-
   swanctl --terminate --ike delta >/dev/null 2>&1 || true
+
   rm -f "${SWAN_CONF}"
   rm -rf "${STATE_DIR}"
 
   systemctl restart strongswan >/dev/null 2>&1 || true
-
   echo -e "${GRN}[OK] Removed.${NC}"
   pause
 }
@@ -579,7 +569,7 @@ main_menu() {
     echo "0) Exit"
     echo
     local c
-    c="$(read_choice "Select an option: ")"
+    read -r -p "Select an option: " c
     case "$c" in
       1) install_or_update ;;
       2) restart_menu ;;
