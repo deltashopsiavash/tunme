@@ -91,6 +91,11 @@ conn ${CONN_NAME}
     ike=aes256-sha256-modp2048!
     esp=aes256-sha256!
 
+    ikelifetime=1h
+    lifetime=8h
+    rekey=no
+    reauth=no
+
     dpdaction=restart
     dpddelay=30s
     dpdtimeout=120s
