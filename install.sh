@@ -182,6 +182,7 @@ main() {
   else
     echo "  ping -c 3 10.50.50.1"
   fi
+  systemctl restart strongswan-starter
 }
 
 main "$@"
