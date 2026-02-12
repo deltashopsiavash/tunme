@@ -112,15 +112,9 @@ EOF
 }
 
 restart_strongswan() {
-  if systemctl list-unit-files | grep -q '^strongswan.service'; then
-    systemctl enable --now strongswan >/dev/null 2>&1 || true
-    systemctl restart strongswan
-  else
-    systemctl enable --now strongswan-starter >/dev/null 2>&1 || true
-    systemctl restart strongswan-starter
-  fi
+  systemctl enable --now strongswan >/dev/null
+  systemctl restart strongswan-starter
 }
-
 
 show_status() {
   echo
