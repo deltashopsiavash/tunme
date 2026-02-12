@@ -39,7 +39,7 @@ get_public_ip() {
   echo "${ip:-Unknown}"
 }
 
-bbanner() {
+banner() {
   clear
   echo -e "${MAG}"
   cat <<'EOF'
