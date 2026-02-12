@@ -55,7 +55,7 @@ banner() {
 
 EOF
   echo -e "${NC}"
-  echo -e "${YLW}        telegram: @delta_vpn12${NC}"
+  echo -e "${YLW}        telegram: @delta_vpn12 , @Best_vpn_admin${NC}"
   echo
 }
 
