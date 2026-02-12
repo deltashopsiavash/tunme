@@ -25,20 +25,15 @@ require_root() {
   fi
 }
 
-pause() {
-  read -r -p "Press Enter to continue..." _
-}
-
+pause() { read -r -p "Press Enter to continue..." _; }
 cmd_exists() { command -v "$1" >/dev/null 2>&1; }
 
 get_public_ip() {
-  # Best-effort. If server is behind NAT, external services work better.
   local ip=""
   if cmd_exists curl; then
     ip="$(curl -4 -s --max-time 2 https://api.ipify.org || true)"
   fi
   if [[ -z "$ip" ]]; then
-    # Fallback: shows outbound interface address (may be private if behind NAT)
     ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '/src/ {for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}' || true)"
   fi
   echo "${ip:-Unknown}"
@@ -76,7 +71,6 @@ install_packages() {
 
 enable_sysctls() {
   echo -e "${BLU}[*] Applying sysctl tweaks...${NC}"
-  # Forward not strictly required for host-to-host, but safe for future expansion.
   cat >/etc/sysctl.d/99-delta-vpn.conf <<'EOF'
 net.ipv4.ip_forward=1
 net.ipv4.conf.all.rp_filter=0
@@ -86,22 +80,15 @@ EOF
 }
 
 open_firewall() {
-  # Best effort: ufw if present, otherwise skip.
   if cmd_exists ufw; then
     echo -e "${BLU}[*] Configuring UFW (best effort)...${NC}"
     ufw allow 500/udp >/dev/null 2>&1 || true
     ufw allow 4500/udp >/dev/null 2>&1 || true
-    # ESP is protocol 50; ufw supports it on newer versions, ignore failures.
     ufw allow proto esp >/dev/null 2>&1 || true
   fi
 }
 
-read_choice() {
-  local prompt="$1"
-  local choice
-  read -r -p "${prompt}" choice
-  echo "$choice"
-}
+read_choice() { local p="$1"; local c; read -r -p "${p}" c; echo "$c"; }
 
 ask_role() {
   echo "Select server location:"
@@ -124,7 +111,6 @@ ask_ipv4() {
   while true; do
     read -r -p "${prompt}" ip
     if [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
-      # basic range check
       IFS='.' read -r a b c d <<<"$ip"
       if ((a<=255 && b<=255 && c<=255 && d<=255)); then
         echo "$ip"; return
@@ -135,9 +121,7 @@ ask_ipv4() {
 }
 
 ask_int_range() {
-  local prompt="$1"
-  local min="$2"
-  local max="$3"
+  local prompt="$1" min="$2" max="$3"
   local n
   while true; do
     read -r -p "${prompt}" n
@@ -148,17 +132,73 @@ ask_int_range() {
   done
 }
 
+expected_octets_for_role() {
+  local role="$1"
+  if [[ "$role" == "iran" ]]; then
+    echo "1 2"   # local_octet remote_octet
+  else
+    echo "2 1"
+  fi
+}
+
+cleanup_lo_ips() {
+  # Remove ALL 10.50.* loopback /32 addresses (safe for our scheme)
+  ip -4 addr show dev lo | awk '/10\.50\./ {print $2}' | while read -r cidr; do
+    ip addr del "$cidr" dev lo >/dev/null 2>&1 || true
+  done
+}
+
+enforce_lo_ips_for_role() {
+  local role="$1" count="$2"
+  read -r local_octet remote_octet < <(expected_octets_for_role "$role")
+
+  # Clean first to avoid mixed roles (.1 and .2 together) or the famous "both .2"
+  cleanup_lo_ips
+
+  for ((i=0; i<count; i++)); do
+    local net=$((50 + i*10))
+    local lip="10.50.${net}.${local_octet}"
+    ip addr add "${lip}/32" dev lo >/dev/null 2>&1 || true
+  done
+
+  # Sanity check (prevents silent wrong role)
+  local expected_first="10.50.50.${local_octet}"
+  if ! ip -4 addr show dev lo | grep -qE "\\b${expected_first}/32\\b"; then
+    echo -e "${RED}ERROR:${NC} Loopback sanity check failed."
+    echo "Expected ${expected_first}/32 on lo but did not find it."
+    exit 1
+  fi
+}
+
+load_strongswan_safe() {
+  echo -e "${BLU}[*] Loading configuration...${NC}"
+  systemctl restart strongswan >/dev/null 2>&1 || true
+
+  # wait for VICI socket (max 8s)
+  for i in {1..8}; do
+    [[ -S /run/charon.vici || -S /var/run/charon.vici ]] && break
+    sleep 1
+  done
+
+  if [[ ! -S /run/charon.vici && ! -S /var/run/charon.vici ]]; then
+    echo -e "${RED}ERROR:${NC} charon.vici not found. StrongSwan is not ready."
+    echo "Run: sudo systemctl status strongswan --no-pager"
+    exit 1
+  fi
+
+  if ! timeout 12 swanctl --load-all -v; then
+    echo -e "${RED}ERROR:${NC} swanctl --load-all failed (timeout or error)."
+    echo "Check logs: sudo journalctl -u strongswan -n 200 --no-pager"
+    exit 1
+  fi
+
+  swanctl --initiate --ike delta >/dev/null 2>&1 || true
+}
+
 write_config() {
   local role="$1" remote_pub="$2" count="$3" psk="$4"
 
-  local local_octet remote_octet
-  if [[ "$role" == "iran" ]]; then
-    local_octet=1
-    remote_octet=2
-  else
-    local_octet=2
-    remote_octet=1
-  fi
+  read -r local_octet remote_octet < <(expected_octets_for_role "$role")
 
   # Save state
   cat >"${STATE_DIR}/state.env" <<EOF
@@ -170,7 +210,11 @@ REMOTE_OCTET=${remote_octet}
 EOF
   chmod 600 "${STATE_DIR}/state.env"
 
-  # Build ip pairs file and add IPs to lo
+  # Enforce correct local IPs (ANTI-MISTAKE CORE)
+  enforce_lo_ips_for_role "$role" "$count"
+
+  # Build ip pairs file (fresh)
+  rm -f "${IP_LIST_FILE}" >/dev/null 2>&1 || true
   : > "${IP_LIST_FILE}"
   for ((i=0; i<count; i++)); do
     local net=$((50 + i*10))
@@ -180,18 +224,7 @@ EOF
   done
   chmod 600 "${IP_LIST_FILE}"
 
-  # Add local IPs to loopback (idempotent)
-  while read -r lip _; do
-    if ! ip -4 addr show dev lo | grep -qE "\\b${lip}/32\\b"; then
-      ip addr add "${lip}/32" dev lo
-    fi
-  done < "${IP_LIST_FILE}"
-
-  # Write swanctl.conf
   echo -e "${BLU}[*] Writing StrongSwan configuration...${NC}"
-  mkdir -p "${SWAN_DIR}"
-
-  # Connection name: delta (avoid the word "tunnel" in UI; config internal is fine)
   cat > "${SWAN_CONF}" <<EOF
 connections {
   delta {
@@ -207,7 +240,6 @@ connections {
       id = %any
     }
 
-    # keepalive/DPD for stability
     dpd_delay = 30s
     dpd_timeout = 120s
     rekey_time = 1h
@@ -216,7 +248,6 @@ connections {
     children {
 EOF
 
-  # children per pair
   for ((i=0; i<count; i++)); do
     local net=$((50 + i*10))
     local lip="10.50.${net}.${local_octet}"
@@ -245,15 +276,10 @@ secrets {
 }
 EOF
 
-  # inject PSK safely
   sed -i "s|__PSK__|${psk//\\/\\\\}|g" "${SWAN_CONF}"
   chmod 600 "${SWAN_CONF}"
 
-  # Load
-  swanctl --load-all >/dev/null
-
-  # Initiate all children
-  swanctl --initiate --ike delta >/dev/null 2>&1 || true
+  load_strongswan_safe
 
   echo -e "${GRN}[OK] Configuration applied.${NC}"
 }
@@ -261,7 +287,6 @@ EOF
 install_or_update() {
   banner
   ensure_dirs
-
   echo -e "${BLU}Public IPv4:${NC} $(get_public_ip)"
   echo
 
@@ -280,9 +305,8 @@ install_or_update() {
   echo
 
   write_config "$role" "$remote_pub" "$count" "$psk"
-
   echo
-  echo -e "${YLW}Tip:${NC} Run option 4 to verify status."
+  echo -e "${YLW}Tip:${NC} Use option 4 to verify status."
   pause
 }
 
@@ -323,12 +347,11 @@ if [[ ! -f "${IP_LIST_FILE}" ]]; then
   exit 0
 fi
 
-# Ping each remote "VPN IP" once. If ANY fails -> restart strongswan + reload.
 ok=1
 while read -r lip rip; do
-  # Ensure local IP exists (idempotent)
+  # ensure local ip exists
   if ! ip -4 addr show dev lo | grep -qE "\\b${lip}/32\\b"; then
-    ip addr add "${lip}/32" dev lo || true
+    ip addr add "${lip}/32" dev lo >/dev/null 2>&1 || true
   fi
 
   if ping -c 1 -W 1 -I "${lip}" "${rip}" >/dev/null 2>&1; then
@@ -440,26 +463,19 @@ remove_all() {
     return
   fi
 
-  # Disable timers/services
   systemctl disable --now delta-vpn-auto.timer >/dev/null 2>&1 || true
   systemctl disable --now delta-vpn-manual.timer >/dev/null 2>&1 || true
   rm -f "${AUTO_SERVICE}" "${AUTO_TIMER}" "${MAN_SERVICE}" "${MAN_TIMER}" \
         /usr/local/bin/delta-vpn-healthcheck.sh /usr/local/bin/delta-vpn-restart.sh
   systemctl daemon-reload || true
 
-  # Remove loopback IPs
-  if [[ -f "${IP_LIST_FILE}" ]]; then
-    while read -r lip _; do
-      ip addr del "${lip}/32" dev lo >/dev/null 2>&1 || true
-    done < "${IP_LIST_FILE}"
-  fi
+  # Always clean any 10.50.* local IPs even if list file is missing
+  cleanup_lo_ips
 
-  # Terminate SAs and remove config
   swanctl --terminate --ike delta >/dev/null 2>&1 || true
   rm -f "${SWAN_CONF}"
   rm -rf "${STATE_DIR}"
 
-  # Reload
   systemctl restart strongswan >/dev/null 2>&1 || true
 
   echo -e "${GRN}[OK] Removed.${NC}"
